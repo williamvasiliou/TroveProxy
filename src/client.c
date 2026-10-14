@@ -119,6 +119,10 @@ void menu() {
 
 	size_t read = 0;
 	for (;;) {
+		if (feof(stdin) || ferror(stdin)) {
+			MENU_DISCONNECT(client);
+			return;
+		}
 		printf("\n1. Connect directly (IPv4)\n2. Connect directly (IPv6)\n3. Connect through proxy (IPv4)\n4. Connect through proxy (IPv6)\n5. Send data\n6. Disconnect\nQ. Quit\n\nPlease select: ");
 		read = get_data(data, 2);
 
@@ -174,15 +178,17 @@ void menu() {
 							printf("Enter data: ");
 							read = get_data(data, DATA_READ);
 							if (read < DATA_READ) {
-								data[read] = 0;
-								const size_t sent = send_all(client, data, read);
-								if (read - sent) {
-									fputs("Error: send_all\n", stderr);
-								} else {
-									if (recv_all(client, data, read) - read) {
-										fputs("Error: recv_all\n", stderr);
+								if (read > 0 && data[read - 1] == '\n') {
+									data[read] = 0;
+									const size_t sent = send_all(client, data, read);
+									if (read - sent) {
+										fputs("Error: send_all\n", stderr);
 									} else {
-										printf("Server: %s", data);
+										if (recv_all(client, data, read) - read) {
+											fputs("Error: recv_all\n", stderr);
+										} else {
+											printf("Server: %s", data);
+										}
 									}
 								}
 							} else {

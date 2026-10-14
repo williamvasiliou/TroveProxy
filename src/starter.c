@@ -544,23 +544,23 @@ char *get_basename(const char *const path) {
 	return NULL;
 }
 
-uint8_t start_inject_process(const char *const executable, const char *const dll_path) {
+HANDLE start_inject_process(const char *const executable, const char *const dll_path, size_t *const identifier) {
 	STARTUPINFOA startup = {};
 	PROCESS_INFORMATION info = {};
 
 	size_t size = strlen(dll_path);
 	if (size < 1) {
-		return 1;
+		return NULL;
 	}
 
 	size = strlen(executable);
 	if (size < 1) {
-		return 1;
+		return NULL;
 	}
 
 	char *const working_directory = GlobalAlloc(GMEM_FIXED | GMEM_ZEROINIT, size + 1);
 	if (!working_directory) {
-		return 1;
+		return NULL;
 	}
 	memcpy(working_directory, executable, size);
 
@@ -576,7 +576,7 @@ uint8_t start_inject_process(const char *const executable, const char *const dll
 	if (!CreateProcessA(executable, NULL, NULL, NULL, 0, CREATE_SUSPENDED, NULL, working_directory, &startup, &info)) {
 		SHOW_ERROR(CreateProcessA);
 		GlobalFree(working_directory);
-		return 1;
+		return NULL;
 	}
 
 	const uintmax_t entry_point = get_entry_point(info.hProcess);
@@ -644,12 +644,13 @@ uint8_t start_inject_process(const char *const executable, const char *const dll
 	}
 
 	ResumeThread(info.hThread);
-
-	CloseHandle(info.hProcess);
 	CloseHandle(info.hThread);
 
 	GlobalFree(working_directory);
-	return 0;
+	if (identifier) {
+		*identifier = info.dwProcessId;
+	}
+	return info.hProcess;
 
 error_terminate:
 	TerminateProcess(info.hProcess, 0);
@@ -658,5 +659,5 @@ error_terminate:
 	CloseHandle(info.hThread);
 
 	GlobalFree(working_directory);
-	return 1;
+	return NULL;
 }

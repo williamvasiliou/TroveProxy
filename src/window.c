@@ -21,6 +21,7 @@ void invalidate_lines(const HWND hwnd, const lines_t *const lines) {
 	const size_t top = lines->y;
 	RECT rect = {left - DRAW_BORDER_WIDTH, top - DRAW_BORDER_WIDTH, left + lines->width + DRAW_BORDER_WIDTH + SCROLLBAR_WIDTH, top + lines->height + DRAW_BORDER_WIDTH};
 	InvalidateRect(hwnd, &rect, 0);
+	UpdateWindow(hwnd);
 }
 
 void reset_lines(const HWND hwnd, lines_t *const lines) {
@@ -69,25 +70,34 @@ void add_line(lines_t *const lines, const char *const line) {
 	const size_t height = lines->height;
 	const size_t total_line_height = lines->count * DRAW_LINE_HEIGHT;
 	if (total_line_height > height) {
-		lines->max_scroll_value = total_line_height - height;
+		if (lines->scroll_value == lines->max_scroll_value) {
+			lines->max_scroll_value = total_line_height - height;
+			lines->scroll_value = lines->max_scroll_value;
+		} else {
+			lines->max_scroll_value = total_line_height - height;
+		}
 	}
 }
 
 void window_add_to_file(window_t *const window, const char *const line) {
 	const HANDLE mutex = window->file_mutex;
-	FILE *const stream = window->file;
 	WaitForSingleObjectEx(mutex, INFINITE, 0);
-	fprintf(stream, "%s\n", line);
-	fflush(stream);
+	FILE *const stream = window->file;
+	if (stream) {
+		fprintf(stream, "%s\n", line);
+		fflush(stream);
+	}
 	ReleaseMutex(mutex);
 }
 
 void window_add_to_lines(window_t *const window, const char *const line) {
 	const HANDLE mutex = window->lines_mutex;
-	lines_t *const lines = window->lines;
 	WaitForSingleObjectEx(mutex, INFINITE, 0);
-	add_line(lines, line);
-	invalidate_lines(window->hwnd, lines);
+	lines_t *const lines = window->lines;
+	if (lines) {
+		add_line(lines, line);
+		invalidate_lines(window->hwnd, lines);
+	}
 	ReleaseMutex(mutex);
 }
 
@@ -189,6 +199,7 @@ void paint_lines(const HWND hwnd, const lines_t *const lines) {
 		return;
 	}
 	SelectObject(source, lines->bitmap);
+	SelectObject(source, lines->font);
 
 	const size_t total_width = lines->total_width;
 	const size_t total_height = lines->total_height;
@@ -390,15 +401,53 @@ FILE *window_create_file(window_t *const window) {
 
 void window_handle_button(window_t *const window, const HWND hwnd) {
 	if (hwnd == window->hwnd_start) {
-		EnableWindow(window->hwnd_dll_path, 0);
-		EnableWindow(window->hwnd_executable_path, 0);
-		EnableWindow(window->hwnd_start, 0);
-		EnableWindow(window->hwnd_create_file, 0);
-		reset_lines(window->hwnd, window->lines);
+		const HANDLE file_mutex = window->file_mutex;
+		const HANDLE started_mutex = window->started_mutex;
+		WaitForSingleObjectEx(file_mutex, INFINITE, 0);
+		WaitForSingleObjectEx(started_mutex, INFINITE, 0);
+		if (window->is_started) {
+			EnableWindow(window->hwnd_start, 0);
 
-		const HANDLE mutex = window->started_mutex;
-		WaitForSingleObjectEx(mutex, INFINITE, 0);
-		if (!window->is_started) {
+			if (window->file) {
+				fclose(window->file);
+				window->file = NULL;
+			}
+
+			if (window->process) {
+				TerminateProcess(window->process, 0);
+				CloseHandle(window->process);
+				window->process = NULL;
+
+				const HANDLE mutex = window->print_mutex;
+				WaitForSingleObjectEx(mutex, INFINITE, 0);
+				if (window->is_adding_to_file) {
+					window_add_to_file(window, "");
+					window_add_to_file(window, "Process terminated.");
+				}
+				window_add_to_lines(window, "");
+				window_add_to_lines(window, "Process terminated.");
+				ReleaseMutex(mutex);
+			}
+
+			EnableWindow(window->hwnd_pause_resume, 0);
+			EnableWindow(window->hwnd_save_snapshot, 0);
+
+			EnableWindow(window->hwnd_dll_path, 1);
+			EnableWindow(window->hwnd_executable_path, 1);
+			EnableWindow(window->hwnd_create_file, 1);
+
+			SetWindowTextA(window->hwnd_start, "Start");
+			EnableWindow(window->hwnd_start, 1);
+
+			window->is_started = 0;
+		} else {
+			EnableWindow(window->hwnd_start, 0);
+			reset_lines(window->hwnd, window->lines);
+
+			EnableWindow(window->hwnd_dll_path, 0);
+			EnableWindow(window->hwnd_executable_path, 0);
+			EnableWindow(window->hwnd_create_file, 0);
+
 			FILE *stream = NULL;
 			uint8_t error = 0;
 
@@ -414,30 +463,48 @@ void window_handle_button(window_t *const window, const HWND hwnd) {
 			}
 
 			if (!error) {
+				size_t identifier = 0;
 				GetWindowTextA(window->hwnd_dll_path, window->dll_path, MAX_PATH);
 				GetWindowTextA(window->hwnd_executable_path, window->executable_path, MAX_PATH);
-				error = start_inject_process(window->executable_path, window->dll_path);
+				const HANDLE process = start_inject_process(window->executable_path, window->dll_path, &identifier);
+				if (process) {
+					const HANDLE mutex = window->print_mutex;
+					WaitForSingleObjectEx(mutex, INFINITE, 0);
+					char line[LINE_LENGTH] = {};
+					snprintf(line, LINE_LENGTH, "Process %zu started.", identifier);
+					if (window->is_adding_to_file) {
+						window_add_to_file(window, line);
+						window_add_to_file(window, "");
+					}
+					window_add_to_lines(window, line);
+					window_add_to_lines(window, "");
+					ReleaseMutex(mutex);
+				} else {
+					error = 1;
+				}
+				window->process = process;
 			}
 
 			if (error) {
 				if (stream) {
 					fclose(stream);
 				}
+
+				EnableWindow(window->hwnd_dll_path, 1);
+				EnableWindow(window->hwnd_executable_path, 1);
+				EnableWindow(window->hwnd_start, 1);
+				EnableWindow(window->hwnd_create_file, 1);
 			} else {
+				EnableWindow(window->hwnd_pause_resume, 1);
+				EnableWindow(window->hwnd_save_snapshot, 1);
+
+				SetWindowTextA(window->hwnd_start, "Stop");
+				EnableWindow(window->hwnd_start, 1);
 				window->is_started = 1;
 			}
 		}
-
-		if (window->is_started) {
-			EnableWindow(window->hwnd_pause_resume, 1);
-			EnableWindow(window->hwnd_save_snapshot, 1);
-		} else {
-			EnableWindow(window->hwnd_dll_path, 1);
-			EnableWindow(window->hwnd_executable_path, 1);
-			EnableWindow(window->hwnd_start, 1);
-			EnableWindow(window->hwnd_create_file, 1);
-		}
-		ReleaseMutex(mutex);
+		ReleaseMutex(started_mutex);
+		ReleaseMutex(file_mutex);
 	} else if (hwnd == window->hwnd_pause_resume) {
 		window->is_adding_to_lines = !window->is_adding_to_lines;
 		if (window->is_adding_to_lines) {
@@ -699,6 +766,16 @@ int main() {
 		goto error_hwnd;
 	}
 
+	if (!(lines.font = CreateFontA(0, 0, 0, 0, FW_DONTCARE, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Consolas"))) {
+		SHOW_ERROR(CreateFontA);
+		goto error_font;
+	}
+
+	if (!(window.print_mutex = CreateMutexA(NULL, 0, NULL))) {
+		SHOW_ERROR(CreateMutexA);
+		goto error_print_mutex;
+	}
+
 	if (!(window.file_mutex = CreateMutexA(NULL, 0, NULL))) {
 		SHOW_ERROR(CreateMutexA);
 		goto error_file_mutex;
@@ -720,6 +797,10 @@ int main() {
 	UpdateWindow(hwnd);
 
 	const HANDLE proxy_thread = CreateThread(NULL, 0, start_proxy, (void *) &window, 0, NULL);
+	if (!proxy_thread) {
+		SHOW_ERROR(CreateThread);
+		goto error_proxy_thread;
+	}
 
 	MSG msg = {};
 	uint8_t loop = 0;
@@ -733,28 +814,50 @@ int main() {
 	}
 
 	if (window.file) {
+		const HANDLE mutex = window.file_mutex;
+		WaitForSingleObjectEx(mutex, INFINITE, 0);
 		fclose(window.file);
 		window.file = NULL;
+		ReleaseMutex(mutex);
 	}
+
+	if (window.lines) {
+		const HANDLE mutex = window.lines_mutex;
+		WaitForSingleObjectEx(mutex, INFINITE, 0);
+		window.lines = NULL;
+		ReleaseMutex(mutex);
+	}
+
 	CloseHandle(proxy_thread);
 
+	CloseHandle(window.print_mutex);
 	CloseHandle(window.file_mutex);
 	CloseHandle(window.lines_mutex);
 	CloseHandle(window.started_mutex);
 
 	DeleteObject(lines.bitmap);
+	DeleteObject(lines.font);
 	DeleteObject(blue_brush);
 	DeleteObject(pink_brush);
+
+	GlobalFree(window.executable_path);
+	GlobalFree(window.dll_path);
 
 	GlobalFree(data);
 	WSACleanup();
 	return 0;
 
+error_proxy_thread:
+	CloseHandle(window.started_mutex);
 error_started_mutex:
 	CloseHandle(window.lines_mutex);
 error_lines_mutex:
 	CloseHandle(window.file_mutex);
 error_file_mutex:
+	CloseHandle(window.print_mutex);
+error_print_mutex:
+	DeleteObject(lines.font);
+error_font:
 	DeleteObject(lines.bitmap);
 error_hwnd:
 	DeleteObject(pink_brush);

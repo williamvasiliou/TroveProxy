@@ -26,6 +26,7 @@ typedef struct {
 	size_t scroll_value;
 	size_t max_scroll_value;
 
+	HFONT font;
 	HBITMAP bitmap;
 } lines_t;
 
@@ -43,6 +44,7 @@ typedef struct {
 	char *dll_path;
 	char *executable_path;
 
+	HANDLE print_mutex;
 	HANDLE file_mutex;
 	FILE *file;
 	uint8_t is_adding_to_file;
@@ -53,6 +55,7 @@ typedef struct {
 
 	HANDLE started_mutex;
 	uint8_t is_started;
+	HANDLE process;
 
 	uint8_t mouse_down;
 	size_t mouse_x;

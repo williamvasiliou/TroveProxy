@@ -1,26 +1,30 @@
 #include "proxy.h"
 #include "sockall.h"
 #include <stdio.h>
+#include <string.h>
 #include "window.h"
 
 typedef struct {
+	const size_t connection;
 	const SOCKET client;
 	const SOCKET server;
-	const HANDLE client_event;
-	const HANDLE server_event;
-	const HANDLE mutex;
+	uint8_t *const client_data;
+	uint8_t *const server_data;
 	window_t *const window;
+	const HANDLE connection_event;
 } sockets_t;
 
 typedef struct {
 	const SOCKET proxy;
-	const HANDLE mutex;
 	window_t *const window;
+	size_t *const connections;
+	const HANDLE connections_mutex;
+	const HANDLE connection_event;
 } proxy_t;
 
 #define PRINT_DUMP_CHARACTER(value) (value > 31 && value < 127 ? value : '.')
 
-void print_dump_file(window_t *const window, window_add_t add_line, const char sender, const size_t packet_index, uint8_t *const data, const size_t count) {
+void print_dump_file(window_t *const window, window_add_t add_line, SYSTEMTIME *const time, const char sender, const size_t connection, const size_t packet_index, uint8_t *const data, const size_t count) {
 	if (count < 1) {
 		return;
 	}
@@ -31,9 +35,7 @@ void print_dump_file(window_t *const window, window_add_t add_line, const char s
 
 	size_t index = 0;
 
-	SYSTEMTIME time = {};
-	GetLocalTime(&time);
-	snprintf(line, LINE_LENGTH, "[%04d-%02d-%02dT%02d:%02d:%02d] %c #%zu", time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond, sender, packet_index);
+	snprintf(line, LINE_LENGTH, "[%04d-%02d-%02dT%02d:%02d:%02d] %c%zu #%zu", time->wYear, time->wMonth, time->wDay, time->wHour, time->wMinute, time->wSecond, sender, connection, packet_index);
 	add_line(window, line);
 	snprintf(line, LINE_LENGTH, "%s", "                   00 01 02 03  04 05 06 07  08 09 0a 0b  0c 0d 0e 0f");
 	add_line(window, line);
@@ -133,44 +135,39 @@ add_remainder_line:
 
 DWORD client_function(void *const input) {
 	const sockets_t *const sockets = (const sockets_t *) input;
+	const size_t connection = sockets->connection;
 	const SOCKET client = sockets->client, server = sockets->server;
-	const HANDLE client_event = sockets->client_event, server_event = sockets->server_event;
-	const HANDLE mutex = sockets->mutex;
 	window_t *const window = sockets->window;
+	const HANDLE print_mutex = window->print_mutex;
 	const uint8_t is_adding_to_file = window->is_adding_to_file;
 
-	char data[PROXY_DATA_LENGTH] = {};
+	uint8_t *const data = sockets->client_data;
 	uint8_t retries = 0;
 	size_t index = 0;
 	for (;;) {
-		WaitForSingleObjectEx(client_event, INFINITE, 0);
-
 		memset(data, 0, PROXY_DATA_LENGTH);
-		const int read = recv(client, data, PROXY_DATA_LENGTH, 0);
+		const int read = recv(client, (char *) data, PROXY_DATA_LENGTH, 0);
 		if (read > 0) {
 			const size_t length = read;
-			WaitForSingleObjectEx(mutex, INFINITE, 0);
+			WaitForSingleObjectEx(print_mutex, INFINITE, 0);
+			SYSTEMTIME time = {};
+			GetLocalTime(&time);
 			if (is_adding_to_file) {
-				print_dump_file(window, window_add_to_file, 'C', index, (uint8_t *) data, length);
+				print_dump_file(window, window_add_to_file, &time, 'C', connection, index, (uint8_t *) data, length);
 			}
 			if (window->is_adding_to_lines) {
-				print_dump_file(window, window_add_to_lines, 'C', index, (uint8_t *) data, length);
+				print_dump_file(window, window_add_to_lines, &time, 'C', connection, index, (uint8_t *) data, length);
 			}
-			ReleaseMutex(mutex);
+			ReleaseMutex(print_mutex);
 
-			if (send_all(server, data, length) - length) {
-				SetEvent(server_event);
+			if (send_all(server, (const char *) data, length) - length) {
 				return 1;
 			}
 		} else if (++retries >= MAX_RETRIES) {
-			SetEvent(server_event);
 			return 1;
 		} else {
 			continue;
 		}
-
-		ResetEvent(client_event);
-		SetEvent(server_event);
 		retries = 0;
 		++index;
 	}
@@ -180,44 +177,39 @@ DWORD client_function(void *const input) {
 
 DWORD server_function(void *const input) {
 	const sockets_t *const sockets = (const sockets_t *) input;
+	const size_t connection = sockets->connection;
 	const SOCKET client = sockets->client, server = sockets->server;
-	const HANDLE client_event = sockets->client_event, server_event = sockets->server_event;
-	const HANDLE mutex = sockets->mutex;
 	window_t *const window = sockets->window;
+	const HANDLE print_mutex = window->print_mutex;
 	const uint8_t is_adding_to_file = window->is_adding_to_file;
 
-	char data[PROXY_DATA_LENGTH] = {};
+	uint8_t *const data = sockets->server_data;
 	uint8_t retries = 0;
 	size_t index = 0;
 	for (;;) {
-		WaitForSingleObjectEx(server_event, INFINITE, 0);
-
 		memset(data, 0, PROXY_DATA_LENGTH);
-		const int read = recv(server, data, PROXY_DATA_LENGTH, 0);
+		const int read = recv(server, (char *) data, PROXY_DATA_LENGTH, 0);
 		if (read > 0) {
 			const size_t length = read;
-			WaitForSingleObjectEx(mutex, INFINITE, 0);
+			WaitForSingleObjectEx(print_mutex, INFINITE, 0);
+			SYSTEMTIME time = {};
+			GetLocalTime(&time);
 			if (is_adding_to_file) {
-				print_dump_file(window, window_add_to_file, 'S', index, (uint8_t *) data, length);
+				print_dump_file(window, window_add_to_file, &time, 'S', connection, index, (uint8_t *) data, length);
 			}
 			if (window->is_adding_to_lines) {
-				print_dump_file(window, window_add_to_lines, 'S', index, (uint8_t *) data, length);
+				print_dump_file(window, window_add_to_lines, &time, 'S', connection, index, (uint8_t *) data, length);
 			}
-			ReleaseMutex(mutex);
+			ReleaseMutex(print_mutex);
 
-			if (send_all(client, data, length) - length) {
-				SetEvent(client_event);
+			if (send_all(client, (const char *) data, length) - length) {
 				return 1;
 			}
 		} else if (++retries >= MAX_RETRIES) {
-			SetEvent(client_event);
 			return 1;
 		} else {
 			continue;
 		}
-
-		ResetEvent(server_event);
-		SetEvent(client_event);
 		retries = 0;
 		++index;
 	}
@@ -293,11 +285,50 @@ SOCKET connect_to_server(const SOCKET client) {
 	return INVALID_SOCKET;
 }
 
+DWORD proxy_connection(void *const input) {
+	const sockets_t *const data = (const sockets_t *) input;
+	const sockets_t sockets = {data->connection, data->client, data->server, data->client_data, data->server_data, data->window, NULL};
+	SetEvent(data->connection_event);
+
+	const HANDLE client_thread = CreateThread(NULL, 0, client_function, (void *) &sockets, 0, NULL);
+	const HANDLE server_thread = CreateThread(NULL, 0, server_function, (void *) &sockets, 0, NULL);
+	if (client_thread && server_thread) {
+		WaitForSingleObjectEx(server_thread, INFINITE, 0);
+		WaitForSingleObjectEx(client_thread, INFINITE, 0);
+		CloseHandle(server_thread);
+		CloseHandle(client_thread);
+
+		closesocket(sockets.server);
+		closesocket(sockets.client);
+		GlobalFree(sockets.server_data);
+		GlobalFree(sockets.client_data);
+		return 0;
+	} else {
+		if (server_thread) {
+			CloseHandle(server_thread);
+		}
+
+		if (client_thread) {
+			CloseHandle(client_thread);
+		}
+
+		closesocket(sockets.server);
+		closesocket(sockets.client);
+		GlobalFree(sockets.server_data);
+		GlobalFree(sockets.client_data);
+		return 1;
+	}
+}
+
 DWORD proxy_function(void *const input) {
 	const proxy_t *const data = (const proxy_t *) input;
 	const SOCKET proxy = data->proxy;
-	const HANDLE mutex = data->mutex;
 	window_t *const window = data->window;
+	const HANDLE print_mutex = window->print_mutex;
+	const HANDLE started_mutex = window->started_mutex;
+	size_t *const connections = data->connections;
+	const HANDLE connections_mutex = data->connections_mutex;
+	const HANDLE connection_event = data->connection_event;
 
 	char line[LINE_LENGTH] = {};
 	struct sockaddr_in name = {};
@@ -316,12 +347,12 @@ DWORD proxy_function(void *const input) {
 		closesocket(proxy);
 		return 1;
 	}
-	WaitForSingleObjectEx(mutex, INFINITE, 0);
+	WaitForSingleObjectEx(print_mutex, INFINITE, 0);
 	snprintf(line, LINE_LENGTH, "Listening on %u.%u.%u.%u:%u...", name.sin_addr.S_un.S_un_b.s_b1, name.sin_addr.S_un.S_un_b.s_b2, name.sin_addr.S_un.S_un_b.s_b3, name.sin_addr.S_un.S_un_b.s_b4, ntohs(name.sin_port));
 	window_add_to_lines(window, line);
 	*line = 0;
 	window_add_to_lines(window, line);
-	ReleaseMutex(mutex);
+	ReleaseMutex(print_mutex);
 
 	for (;;) {
 		const SOCKET client = accept(proxy, (SOCKADDR *) NULL, (int *) NULL);
@@ -330,6 +361,14 @@ DWORD proxy_function(void *const input) {
 			return 1;
 		}
 
+		WaitForSingleObjectEx(started_mutex, INFINITE, 0);
+		if (!window->is_started) {
+			closesocket(client);
+			ReleaseMutex(started_mutex);
+			continue;
+		}
+		ReleaseMutex(started_mutex);
+
 		const SOCKET server = connect_to_server(client);
 		if (server == INVALID_SOCKET) {
 			SHOW_ERROR(connect_to_server);
@@ -337,23 +376,36 @@ DWORD proxy_function(void *const input) {
 			return 1;
 		}
 
-		const HANDLE client_event = CreateEventA(NULL, 1, 1, NULL);
-		const HANDLE server_event = CreateEventA(NULL, 1, 0, NULL);
-		const sockets_t sockets = {client, server, client_event, server_event, mutex, window};
+		uint8_t *const client_data = GlobalAlloc(GMEM_FIXED | GMEM_ZEROINIT, PROXY_DATA_LENGTH);
+		if (!client_data) {
+			closesocket(server);
+			closesocket(client);
+			return 1;
+		}
 
-		const HANDLE client_thread = CreateThread(NULL, 0, client_function, (void *) &sockets, 0, NULL);
-		const HANDLE server_thread = CreateThread(NULL, 0, server_function, (void *) &sockets, 0, NULL);
+		uint8_t *const server_data = GlobalAlloc(GMEM_FIXED | GMEM_ZEROINIT, PROXY_DATA_LENGTH);
+		if (!server_data) {
+			GlobalFree(client_data);
+			closesocket(server);
+			closesocket(client);
+			return 1;
+		}
 
-		WaitForSingleObjectEx(server_thread, INFINITE, 0);
-		WaitForSingleObjectEx(client_thread, INFINITE, 0);
-		CloseHandle(server_thread);
-		CloseHandle(client_thread);
-
-		CloseHandle(server_event);
-		CloseHandle(client_event);
-
-		closesocket(server);
-		closesocket(client);
+		WaitForSingleObjectEx(connections_mutex, INFINITE, 0);
+		const sockets_t sockets = {*connections, client, server, client_data, server_data, window, connection_event};
+		const HANDLE connection_thread = CreateThread(NULL, 0, proxy_connection, (void *) &sockets, 0, NULL);
+		if (connection_thread) {
+			WaitForSingleObjectEx(connection_event, INFINITE, 0);
+			++(*connections);
+			ResetEvent(connection_event);
+			CloseHandle(connection_thread);
+		} else {
+			GlobalFree(server_data);
+			GlobalFree(client_data);
+			closesocket(server);
+			closesocket(client);
+		}
+		ReleaseMutex(connections_mutex);
 	}
 
 	return 0;
@@ -362,8 +414,12 @@ DWORD proxy_function(void *const input) {
 DWORD proxy6_function(void *const input) {
 	const proxy_t *const data = (const proxy_t *) input;
 	const SOCKET proxy = data->proxy;
-	const HANDLE mutex = data->mutex;
 	window_t *const window = data->window;
+	const HANDLE print_mutex = window->print_mutex;
+	const HANDLE started_mutex = window->started_mutex;
+	size_t *const connections = data->connections;
+	const HANDLE connections_mutex = data->connections_mutex;
+	const HANDLE connection_event = data->connection_event;
 
 	char line[LINE_LENGTH] = {};
 	struct sockaddr_in6 name = {};
@@ -382,12 +438,12 @@ DWORD proxy6_function(void *const input) {
 		closesocket(proxy);
 		return 1;
 	}
-	WaitForSingleObjectEx(mutex, INFINITE, 0);
+	WaitForSingleObjectEx(print_mutex, INFINITE, 0);
 	snprintf(line, LINE_LENGTH, "Listening on [%04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x]:%u...", ntohs(name.sin6_addr.u.Word[0]), ntohs(name.sin6_addr.u.Word[1]), ntohs(name.sin6_addr.u.Word[2]), ntohs(name.sin6_addr.u.Word[3]), ntohs(name.sin6_addr.u.Word[4]), ntohs(name.sin6_addr.u.Word[5]), ntohs(name.sin6_addr.u.Word[6]), ntohs(name.sin6_addr.u.Word[7]), ntohs(name.sin6_port));
 	window_add_to_lines(window, line);
 	*line = 0;
 	window_add_to_lines(window, line);
-	ReleaseMutex(mutex);
+	ReleaseMutex(print_mutex);
 
 	for (;;) {
 		const SOCKET client = accept(proxy, (SOCKADDR *) NULL, (int *) NULL);
@@ -396,6 +452,14 @@ DWORD proxy6_function(void *const input) {
 			return 1;
 		}
 
+		WaitForSingleObjectEx(started_mutex, INFINITE, 0);
+		if (!window->is_started) {
+			closesocket(client);
+			ReleaseMutex(started_mutex);
+			continue;
+		}
+		ReleaseMutex(started_mutex);
+
 		const SOCKET server = connect_to_server(client);
 		if (server == INVALID_SOCKET) {
 			SHOW_ERROR(connect_to_server);
@@ -403,23 +467,36 @@ DWORD proxy6_function(void *const input) {
 			return 1;
 		}
 
-		const HANDLE client_event = CreateEventA(NULL, 1, 1, NULL);
-		const HANDLE server_event = CreateEventA(NULL, 1, 0, NULL);
-		const sockets_t sockets = {client, server, client_event, server_event, mutex, window};
+		uint8_t *const client_data = GlobalAlloc(GMEM_FIXED | GMEM_ZEROINIT, PROXY_DATA_LENGTH);
+		if (!client_data) {
+			closesocket(server);
+			closesocket(client);
+			return 1;
+		}
 
-		const HANDLE client_thread = CreateThread(NULL, 0, client_function, (void *) &sockets, 0, NULL);
-		const HANDLE server_thread = CreateThread(NULL, 0, server_function, (void *) &sockets, 0, NULL);
+		uint8_t *const server_data = GlobalAlloc(GMEM_FIXED | GMEM_ZEROINIT, PROXY_DATA_LENGTH);
+		if (!server_data) {
+			GlobalFree(client_data);
+			closesocket(server);
+			closesocket(client);
+			return 1;
+		}
 
-		WaitForSingleObjectEx(server_thread, INFINITE, 0);
-		WaitForSingleObjectEx(client_thread, INFINITE, 0);
-		CloseHandle(server_thread);
-		CloseHandle(client_thread);
-
-		CloseHandle(server_event);
-		CloseHandle(client_event);
-
-		closesocket(server);
-		closesocket(client);
+		WaitForSingleObjectEx(connections_mutex, INFINITE, 0);
+		const sockets_t sockets = {*connections, client, server, client_data, server_data, window, connection_event};
+		const HANDLE connection_thread = CreateThread(NULL, 0, proxy_connection, (void *) &sockets, 0, NULL);
+		if (connection_thread) {
+			WaitForSingleObjectEx(connection_event, INFINITE, 0);
+			++(*connections);
+			ResetEvent(connection_event);
+			CloseHandle(connection_thread);
+		} else {
+			GlobalFree(server_data);
+			GlobalFree(client_data);
+			closesocket(server);
+			closesocket(client);
+		}
+		ReleaseMutex(connections_mutex);
 	}
 
 	return 0;
@@ -427,7 +504,6 @@ DWORD proxy6_function(void *const input) {
 
 DWORD start_proxy(void *const input) {
 	window_t *const window = (window_t *) input;
-	const HANDLE mutex = CreateMutexA(NULL, 0, NULL);
 
 	const SOCKET proxy = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (proxy == INVALID_SOCKET) {
@@ -442,8 +518,11 @@ DWORD start_proxy(void *const input) {
 		return 1;
 	}
 
-	const proxy_t proxy_data = {proxy, mutex, window};
-	const proxy_t proxy6_data = {proxy6, mutex, window};
+	size_t connections = 0;
+	const HANDLE connections_mutex = CreateMutexA(NULL, 0, NULL);
+	const HANDLE connection_event = CreateEventA(NULL, 1, 0, NULL);
+	const proxy_t proxy_data = {proxy, window, &connections, connections_mutex, connection_event};
+	const proxy_t proxy6_data = {proxy6, window, &connections, connections_mutex, connection_event};
 
 	const HANDLE proxy_thread = CreateThread(NULL, 0, proxy_function, (void *) &proxy_data, 0, NULL);
 	const HANDLE proxy6_thread = CreateThread(NULL, 0, proxy6_function, (void *) &proxy6_data, 0, NULL);
@@ -456,6 +535,7 @@ DWORD start_proxy(void *const input) {
 	closesocket(proxy);
 	closesocket(proxy6);
 
-	CloseHandle(mutex);
+	CloseHandle(connections_mutex);
+	CloseHandle(connection_event);
 	return 0;
 }
