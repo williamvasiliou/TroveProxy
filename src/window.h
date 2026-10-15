@@ -34,7 +34,10 @@ typedef struct {
 	HWND hwnd;
 
 	HWND hwnd_pause_resume;
+	HWND hwnd_clear_snapshot;
 	HWND hwnd_save_snapshot;
+	HWND hwnd_previous_packet;
+	HWND hwnd_next_packet;
 
 	HWND hwnd_dll_path;
 	HWND hwnd_executable_path;
@@ -80,7 +83,7 @@ typedef struct {
 
 #define RESIZE_FIX_WINDOW_HEIGHT(height) (height + 8)
 
-#define TOP_BUTTON_WIDTH(width) ((width - 3 * WINDOW_MARGIN) / 2)
+#define TOP_BUTTON_WIDTH(width) ((width - 6 * WINDOW_MARGIN) / 5)
 #define BOTTOM_Y(height) FIX_WINDOW_Y(height - WINDOW_MARGIN - BUTTON_HEIGHT)
 #define EXECUTABLE_PATH_WIDTH(width) (width - 4 * WINDOW_MARGIN - START_BUTTON_WIDTH - CHECKBOX_WIDTH)
 #define START_BUTTON_WIDTH 64

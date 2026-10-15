@@ -79,6 +79,19 @@ void add_line(lines_t *const lines, const char *const line) {
 	}
 }
 
+void window_reset_lines(const window_t *const window) {
+	const HANDLE print_mutex = window->print_mutex;
+	const HANDLE lines_mutex = window->lines_mutex;
+	WaitForSingleObjectEx(print_mutex, INFINITE, 0);
+	WaitForSingleObjectEx(lines_mutex, INFINITE, 0);
+	lines_t *const lines = window->lines;
+	if (lines) {
+		reset_lines(window->hwnd, lines);
+	}
+	ReleaseMutex(lines_mutex);
+	ReleaseMutex(print_mutex);
+}
+
 void window_add_to_file(window_t *const window, const char *const line) {
 	const HANDLE mutex = window->file_mutex;
 	WaitForSingleObjectEx(mutex, INFINITE, 0);
@@ -150,6 +163,84 @@ void scroll_delta_lines(const HWND hwnd, lines_t *const lines, const intmax_t de
 
 		invalidate_lines(hwnd, lines);
 	}
+}
+
+void scroll_delta_previous(const HWND hwnd, lines_t *const lines) {
+	const char *const data = lines->lines;
+	const size_t index = lines->index;
+	const size_t count = lines->count;
+
+	size_t i = lines->scroll_value / DRAW_LINE_HEIGHT;
+	if (count >= MAX_LINES) {
+		i += index;
+	}
+
+	if (i >= count) {
+		i -= count;
+	}
+
+	size_t j = 0;
+	while (j < count) {
+		if (j > 0 && data[i * LINE_LENGTH] == '[') {
+			scroll_delta_lines(hwnd, lines, -j);
+			break;
+		}
+
+		if (i > 0) {
+			--i;
+		} else {
+			i = count - 1;
+		}
+		++j;
+	}
+}
+
+void scroll_delta_next(const HWND hwnd, lines_t *const lines) {
+	const char *const data = lines->lines;
+	const size_t index = lines->index;
+	const size_t count = lines->count;
+
+	size_t i = lines->scroll_value / DRAW_LINE_HEIGHT;
+	if (count >= MAX_LINES) {
+		i += index;
+	}
+
+	if (i >= count) {
+		i -= count;
+	}
+
+	size_t j = 0;
+	while (j < count) {
+		if (j > 0 && data[i * LINE_LENGTH] == '[') {
+			scroll_delta_lines(hwnd, lines, j);
+			break;
+		}
+
+		if (++i >= count) {
+			i -= count;
+		}
+		++j;
+	}
+}
+
+void window_scroll_delta_previous(window_t *const window) {
+	const HANDLE mutex = window->lines_mutex;
+	WaitForSingleObjectEx(mutex, INFINITE, 0);
+	lines_t *const lines = window->lines;
+	if (lines) {
+		scroll_delta_previous(window->hwnd, lines);
+	}
+	ReleaseMutex(mutex);
+}
+
+void window_scroll_delta_next(window_t *const window) {
+	const HANDLE mutex = window->lines_mutex;
+	WaitForSingleObjectEx(mutex, INFINITE, 0);
+	lines_t *const lines = window->lines;
+	if (lines) {
+		scroll_delta_next(window->hwnd, lines);
+	}
+	ReleaseMutex(mutex);
 }
 
 void paint_scrollbar(const HDC hdc, const lines_t *const lines) {
@@ -326,7 +417,10 @@ void paint_lines(const HWND hwnd, const lines_t *const lines) {
 
 void resize_all(const window_t *const window, const size_t width, const size_t height) {
 	MoveWindow(window->hwnd_pause_resume, WINDOW_MARGIN, FIX_WINDOW_Y(WINDOW_MARGIN), TOP_BUTTON_WIDTH(width), BUTTON_HEIGHT, 1);
-	MoveWindow(window->hwnd_save_snapshot, 2 * WINDOW_MARGIN + TOP_BUTTON_WIDTH(width), FIX_WINDOW_Y(WINDOW_MARGIN), TOP_BUTTON_WIDTH(width), BUTTON_HEIGHT, 1);
+	MoveWindow(window->hwnd_clear_snapshot, 2 * WINDOW_MARGIN + TOP_BUTTON_WIDTH(width), FIX_WINDOW_Y(WINDOW_MARGIN), TOP_BUTTON_WIDTH(width), BUTTON_HEIGHT, 1);
+	MoveWindow(window->hwnd_save_snapshot, 3 * WINDOW_MARGIN + 2 * TOP_BUTTON_WIDTH(width), FIX_WINDOW_Y(WINDOW_MARGIN), TOP_BUTTON_WIDTH(width), BUTTON_HEIGHT, 1);
+	MoveWindow(window->hwnd_previous_packet, 4 * WINDOW_MARGIN + 3 * TOP_BUTTON_WIDTH(width), FIX_WINDOW_Y(WINDOW_MARGIN), TOP_BUTTON_WIDTH(width), BUTTON_HEIGHT, 1);
+	MoveWindow(window->hwnd_next_packet, 5 * WINDOW_MARGIN + 4 * TOP_BUTTON_WIDTH(width), FIX_WINDOW_Y(WINDOW_MARGIN), TOP_BUTTON_WIDTH(width), BUTTON_HEIGHT, 1);
 
 	resize_lines(window->hwnd, window->lines, width - 2 * WINDOW_MARGIN - 2 * DRAW_BORDER_WIDTH - SCROLLBAR_WIDTH, height - 5 * WINDOW_MARGIN - 2 * DRAW_BORDER_WIDTH - 3 * BUTTON_HEIGHT);
 
@@ -421,16 +515,17 @@ void window_handle_button(window_t *const window, const HWND hwnd) {
 				const HANDLE mutex = window->print_mutex;
 				WaitForSingleObjectEx(mutex, INFINITE, 0);
 				if (window->is_adding_to_file) {
-					window_add_to_file(window, "");
 					window_add_to_file(window, "Process terminated.");
 				}
-				window_add_to_lines(window, "");
 				window_add_to_lines(window, "Process terminated.");
 				ReleaseMutex(mutex);
 			}
 
 			EnableWindow(window->hwnd_pause_resume, 0);
+			EnableWindow(window->hwnd_clear_snapshot, 0);
 			EnableWindow(window->hwnd_save_snapshot, 0);
+			EnableWindow(window->hwnd_previous_packet, 0);
+			EnableWindow(window->hwnd_next_packet, 0);
 
 			EnableWindow(window->hwnd_dll_path, 1);
 			EnableWindow(window->hwnd_executable_path, 1);
@@ -442,7 +537,7 @@ void window_handle_button(window_t *const window, const HWND hwnd) {
 			window->is_started = 0;
 		} else {
 			EnableWindow(window->hwnd_start, 0);
-			reset_lines(window->hwnd, window->lines);
+			window_reset_lines(window);
 
 			EnableWindow(window->hwnd_dll_path, 0);
 			EnableWindow(window->hwnd_executable_path, 0);
@@ -496,7 +591,10 @@ void window_handle_button(window_t *const window, const HWND hwnd) {
 				EnableWindow(window->hwnd_create_file, 1);
 			} else {
 				EnableWindow(window->hwnd_pause_resume, 1);
+				EnableWindow(window->hwnd_clear_snapshot, 1);
 				EnableWindow(window->hwnd_save_snapshot, 1);
+				EnableWindow(window->hwnd_previous_packet, 1);
+				EnableWindow(window->hwnd_next_packet, 1);
 
 				SetWindowTextA(window->hwnd_start, "Stop");
 				EnableWindow(window->hwnd_start, 1);
@@ -508,12 +606,18 @@ void window_handle_button(window_t *const window, const HWND hwnd) {
 	} else if (hwnd == window->hwnd_pause_resume) {
 		window->is_adding_to_lines = !window->is_adding_to_lines;
 		if (window->is_adding_to_lines) {
-			SetWindowTextA(window->hwnd_pause_resume, "Pause capture");
+			SetWindowTextA(window->hwnd_pause_resume, "Pause Capture");
 		} else {
-			SetWindowTextA(window->hwnd_pause_resume, "Resume capture");
+			SetWindowTextA(window->hwnd_pause_resume, "Resume Capture");
 		}
+	} else if (hwnd == window->hwnd_clear_snapshot) {
+		window_reset_lines(window);
 	} else if (hwnd == window->hwnd_save_snapshot) {
 		save_snapshot(window->lines);
+	} else if (hwnd == window->hwnd_previous_packet) {
+		window_scroll_delta_previous(window);
+	} else if (hwnd == window->hwnd_next_packet) {
+		window_scroll_delta_next(window);
 	}
 }
 
@@ -661,7 +765,7 @@ int main() {
 	const HWND hwnd = window.hwnd;
 	if (!(window.hwnd_pause_resume = CreateWindowA(
 		"BUTTON",
-		"Pause capture",
+		"Pause Capture",
 		BS_PUSHBUTTON | WS_CHILD | WS_DISABLED | WS_VISIBLE,
 		WINDOW_MARGIN,
 		FIX_WINDOW_Y(WINDOW_MARGIN),
@@ -676,11 +780,62 @@ int main() {
 		goto error_hwnd;
 	}
 
-	if (!(window.hwnd_save_snapshot = CreateWindowA(
+	if (!(window.hwnd_clear_snapshot = CreateWindowA(
 		"BUTTON",
-		"Save current snapshot",
+		"Clear Current Snapshot",
 		BS_PUSHBUTTON | WS_CHILD | WS_DISABLED | WS_VISIBLE,
 		2 * WINDOW_MARGIN + TOP_BUTTON_WIDTH(FIX_WINDOW_WIDTH(WINDOW_WIDTH)),
+		FIX_WINDOW_Y(WINDOW_MARGIN),
+		TOP_BUTTON_WIDTH(FIX_WINDOW_WIDTH(WINDOW_WIDTH)),
+		BUTTON_HEIGHT,
+		hwnd,
+		NULL,
+		NULL,
+		NULL
+	))) {
+		SHOW_ERROR(CreateWindowA);
+		goto error_hwnd;
+	}
+
+	if (!(window.hwnd_save_snapshot = CreateWindowA(
+		"BUTTON",
+		"Save Current Snapshot",
+		BS_PUSHBUTTON | WS_CHILD | WS_DISABLED | WS_VISIBLE,
+		3 * WINDOW_MARGIN + 2 * TOP_BUTTON_WIDTH(FIX_WINDOW_WIDTH(WINDOW_WIDTH)),
+		FIX_WINDOW_Y(WINDOW_MARGIN),
+		TOP_BUTTON_WIDTH(FIX_WINDOW_WIDTH(WINDOW_WIDTH)),
+		BUTTON_HEIGHT,
+		hwnd,
+		NULL,
+		NULL,
+		NULL
+	))) {
+		SHOW_ERROR(CreateWindowA);
+		goto error_hwnd;
+	}
+
+	if (!(window.hwnd_previous_packet = CreateWindowA(
+		"BUTTON",
+		"Scroll to Previous Packet",
+		BS_PUSHBUTTON | WS_CHILD | WS_DISABLED | WS_VISIBLE,
+		4 * WINDOW_MARGIN + 3 * TOP_BUTTON_WIDTH(FIX_WINDOW_WIDTH(WINDOW_WIDTH)),
+		FIX_WINDOW_Y(WINDOW_MARGIN),
+		TOP_BUTTON_WIDTH(FIX_WINDOW_WIDTH(WINDOW_WIDTH)),
+		BUTTON_HEIGHT,
+		hwnd,
+		NULL,
+		NULL,
+		NULL
+	))) {
+		SHOW_ERROR(CreateWindowA);
+		goto error_hwnd;
+	}
+
+	if (!(window.hwnd_next_packet = CreateWindowA(
+		"BUTTON",
+		"Scroll to Next Packet",
+		BS_PUSHBUTTON | WS_CHILD | WS_DISABLED | WS_VISIBLE,
+		5 * WINDOW_MARGIN + 4 * TOP_BUTTON_WIDTH(FIX_WINDOW_WIDTH(WINDOW_WIDTH)),
 		FIX_WINDOW_Y(WINDOW_MARGIN),
 		TOP_BUTTON_WIDTH(FIX_WINDOW_WIDTH(WINDOW_WIDTH)),
 		BUTTON_HEIGHT,
@@ -766,7 +921,7 @@ int main() {
 		goto error_hwnd;
 	}
 
-	if (!(lines.font = CreateFontA(0, 0, 0, 0, FW_DONTCARE, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Consolas"))) {
+	if (!(lines.font = CreateFontA(DRAW_LINE_HEIGHT, 0, 0, 0, FW_DONTCARE, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Consolas"))) {
 		SHOW_ERROR(CreateFontA);
 		goto error_font;
 	}

@@ -24,7 +24,7 @@ typedef struct {
 
 #define PRINT_DUMP_CHARACTER(value) (value > 31 && value < 127 ? value : '.')
 
-void print_dump_file(window_t *const window, window_add_t add_line, SYSTEMTIME *const time, const char sender, const size_t connection, const size_t packet_index, uint8_t *const data, const size_t count) {
+void print_dump_file(window_t *const window, const window_add_t add_line, const SYSTEMTIME *const time, const char sender, const size_t connection, const size_t packet_index, const uint8_t *const data, const size_t count) {
 	if (count < 1) {
 		return;
 	}
